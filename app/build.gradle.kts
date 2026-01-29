@@ -43,7 +43,7 @@ android {
         }
     }
     androidResources {
-        noCompress += listOf("onnx", "pb", "bin", "json", "txt", "part0", "part1", "part2", "part3")
+        noCompress += listOf("onnx", "pb", "bin", "json", "txt", "part0", "part1", "part2", "part3", "data")
     }
 }
 

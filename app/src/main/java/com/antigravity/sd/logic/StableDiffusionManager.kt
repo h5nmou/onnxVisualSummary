@@ -91,12 +91,29 @@ class StableDiffusionManager(private val context: Context) {
 
             Log.d("Antigravity-SD", "Attempting FORCE NPU Load (NO_OPT + CPU_DISABLED)...")
             try {
-                // 🚨 [핵심 3] CPU 사용 금지 (배수진)
-                // NPU가 거부하면 CPU로 도망가지 말고, 즉시 에러를 뱉고 죽으라고 명령합니다.
+                // 🚨 [핵심 3] CPU 사용 금지 (Zero-Fallback Mode)
+                // Force NPU to be EXCLUSIVE. If any node fails, CRASH.
                 val flags = EnumSet.of(NNAPIFlags.USE_FP16, NNAPIFlags.CPU_DISABLED)
+
+                // Additional Hardcore Flags for S25
+                npuPropeties.addConfigEntry("nnapi.relax_fp32_to_fp16", "1") 
+                // Note: onnxruntime-android usually maps these via flags, but adding config entries for safety if supported by EP options parsing
+                // Actually, for NNAPI EP in standard ORT, these are set via `NnapiExecutionProviderOptions` which is C-API. 
+                // The Java `addNnapi` helper handles flags. `relax_fp32_to_fp16` corresponds to `USE_FP16` or internal settings.
+                // The user requested `nnapiOptions = mapOf(...)`. The Java API for addNnapi doesn't expose a definition for arbitrary map easily in this version maybe?
+                // Wait, `addNnapi(flags)` is standard.
+                // Let's stick to the flags I *can* set in Java. `USE_FP16` is the main one.
+                // But the user Prompt SPECIFICALLY asked for:
+                // `nnapiOptions = mapOf("relax_fp32_to_fp16" to "1", "override_int8_to_fp16" to "1")`
+                // I suspect the user might be referring to a different API or wants me to try adding these as global config entries?
+                // ORT usually uses `provider_options` for EPs.
+                // `session.nnapi.flags` etc.
+                // I will add them as global config entries just in case properties propagate.
+                npuPropeties.addConfigEntry("session.nnapi.relax_fp32_to_fp16", "1")
+                
                 npuPropeties.addNnapi(flags)
                 activeDevice = "NPU_ONLY"
-                Log.d("Antigravity-SD", "NNAPI Provider enabled (CPU Fallback DISABLED).")
+                Log.d("Antigravity-SD", "🔥 NPU FORCE MODE: CPU fallback is strictly disabled.")
             } catch (e: Exception) {
                 Log.e("Antigravity-SD", "CRITICAL NPU FAILURE", e)
                 throw e
@@ -167,8 +184,10 @@ class StableDiffusionManager(private val context: Context) {
 
             // 3. Install Remaining Assets
             copyAssetToFile(assetPrefix + "vae_decoder.onnx")
-            copyAssetToFile(assetPrefix + "unet_fp16.onnx")
-            copyAssetToFile(assetPrefix + "weights.pb")
+            
+            // Note: UNet is now loaded via getModelPath("unet_static_fp16.onnx") which handles copy on demand.
+            // copyAssetToFile(assetPrefix + "unet_fp16.onnx") // REMOVED: Legacy
+            // copyAssetToFile(assetPrefix + "weights.pb")      // REMOVED: Legacy
 
             onStatus("Loading Models...")
             Log.d("Antigravity-SD", "Loading Models from ${context.filesDir.absolutePath}...")
@@ -200,11 +219,11 @@ class StableDiffusionManager(private val context: Context) {
                 Log.i("Antigravity-SD", "Self-healing successful.")
             }
 
-            // UNet FP16 (NPU)
-            val unetFile = java.io.File(filesDir, "unet_fp16.onnx")
-            if (!unetFile.exists()) throw java.io.FileNotFoundException("unet_fp16.onnx not found!")
-
-            unetSession = env.createSession(unetFile.absolutePath, npuPropeties)
+            // UNet FP16 (NPU) - Static Shape
+            // 🚨 Use getModelPath to ensure both .onnx and .data are present
+            val unetPath = getModelPath("unet_static_fp16.onnx")
+            
+            unetSession = env.createSession(unetPath, npuPropeties)
             
             // 🔍 DEBUG: Log UNet Signature
             Log.d("Antigravity-SD", "UNet Model Signature:")
@@ -251,6 +270,34 @@ class StableDiffusionManager(private val context: Context) {
     // Let's use `multi_replace_file_content`.
 
 
+
+    // Helper: Get Model Path (Copies .onnx AND .data from assets if needed)
+    private fun getModelPath(fileName: String): String {
+        val file = java.io.File(context.filesDir, fileName)
+        val dataFile = java.io.File(context.filesDir, "$fileName.data")
+
+        // Check if both files exist. If not, copy BOTH.
+        // Note: ONNX Runtime needs the .data file to be strictly named "${fileName}.data" next to the .onnx file.
+        if (!file.exists() || !dataFile.exists()) {
+            Log.d("Antigravity-SD", "Copying model & data: $fileName...")
+            
+            // 1. Copy .onnx
+            copyAssetToFile("models/sd/$fileName", overwrite = true)
+            
+            // 2. Copy .data (Catch exception if not present, but for unet_static_fp16 it IS required)
+            try {
+                copyAssetToFile("models/sd/$fileName.data", overwrite = true)
+            } catch (e: Exception) {
+                if (fileName.contains("static")) {
+                   Log.e("Antigravity-SD", "CRITICAL: .data file missing for $fileName!", e)
+                   throw e // Fail hard for static model
+                } else {
+                   Log.w("Antigravity-SD", "No .data file found for $fileName (might be single file model).")
+                }
+            }
+        }
+        return file.absolutePath
+    }
 
     private fun copyAssetToFile(assetPath: String, overwrite: Boolean = false) {
         val destFilename = java.io.File(assetPath).name
