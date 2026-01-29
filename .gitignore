@@ -1,0 +1,12 @@
+# 맥 시스템 파일 (필수)
+.DS_Store
+
+# 각종 로그 파일
+*.log
+
+# 빌드 관련 폴더 (언어에 따라 다름)
+/build
+/dist
+node_modules/
+venv/
+.env
